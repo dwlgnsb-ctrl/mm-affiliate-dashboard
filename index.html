@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mary&May TikTok 어필리에잇 대시보드</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="noise-layer"></div>
+
+<header class="topbar">
+  <div class="topbar-left">
+    <div class="brand">
+      <span class="brand-mark">M&amp;M</span>
+      <div class="brand-text">
+        <h1>어필리에잇 대시보드</h1>
+        <p>TikTok Shop US · 크리에이터 &amp; 광고 성과</p>
+      </div>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="sync-status" id="syncStatus">
+      <span class="dot" id="syncDot"></span>
+      <span id="syncText">데이터 불러오는 중…</span>
+    </div>
+    <button class="btn btn-ghost" id="refreshBtn">↻ 새로고침</button>
+  </div>
+</header>
+
+<main>
+
+  <section class="kpi-strip" id="kpiStrip">
+    <div class="kpi-card">
+      <span class="kpi-label">참여 크리에이터</span>
+      <span class="kpi-value" id="kpiCreators">–</span>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-label">전체 업로드 영상</span>
+      <span class="kpi-value" id="kpiVideos">–</span>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-label">누적 GMV (USD)</span>
+      <span class="kpi-value" id="kpiGmv">–</span>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-label">GMV MAX 광고비 (KRW)</span>
+      <span class="kpi-value" id="kpiGmvMaxCost">–</span>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-label">스파크애즈 광고비 (KRW)</span>
+      <span class="kpi-value" id="kpiSparkCost">–</span>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-label">미매칭 스파크애즈 지출</span>
+      <span class="kpi-value warn" id="kpiUnmatchedSpark">–</span>
+    </div>
+  </section>
+
+  <section class="controls">
+    <input type="search" id="searchInput" placeholder="유저네임 / 소셜핸들 검색…">
+
+    <select id="sortSelect">
+      <option value="recent">최근 업로드순</option>
+      <option value="gmv">GMV 높은순</option>
+      <option value="videos">영상 개수순</option>
+      <option value="alpha">이름순 (A-Z)</option>
+    </select>
+
+    <select id="tierFilter">
+      <option value="">전체 티어</option>
+    </select>
+
+    <div class="spacer"></div>
+
+    <button class="btn btn-outline" id="exportTiersBtn">티어 내보내기</button>
+    <label class="btn btn-outline" for="importTiersInput">티어 가져오기
+      <input type="file" id="importTiersInput" accept=".csv" hidden>
+    </label>
+  </section>
+
+  <section class="legend">
+    <span><i class="dot dot-gmvmax"></i> GMV MAX 매칭 (영상 단위, 정확 매칭)</span>
+    <span><i class="dot dot-spark"></i> 스파크애즈 (크리에이터 단위 합산, best-effort 매칭)</span>
+    <span><i class="dot dot-none"></i> 광고 미집행 / 미매칭</span>
+  </section>
+
+  <section class="view-toggle">
+    <button class="view-tab active" data-view="videos">전체 영상 리스트</button>
+    <button class="view-tab" data-view="creators">크리에이터별 보기</button>
+  </section>
+
+  <section id="unmatchedNotice" class="notice" hidden></section>
+
+  <section id="videoListView" class="video-list-view">
+    <div class="video-list-controls">
+      <span class="stat-label">정렬:</span>
+      <button class="sort-chip active" data-sort="impressions">노출수 많은순</button>
+      <button class="sort-chip" data-sort="orders">전환수(주문) 많은순</button>
+      <button class="sort-chip" data-sort="cost">광고비 많은순</button>
+      <button class="sort-chip" data-sort="recent">최신 업로드순</button>
+      <button class="sort-chip" data-sort="gmv">GMV 높은순</button>
+      <span class="spacer"></span>
+      <label class="chip-toggle"><input type="checkbox" id="adOnlyFilter"> 광고 집행 영상만</label>
+    </div>
+    <div class="video-table-wrap">
+      <table class="video-table full-list">
+        <thead>
+          <tr>
+            <th>크리에이터 (티어)</th>
+            <th>업로드일</th>
+            <th>영상</th>
+            <th class="num">조회/노출</th>
+            <th class="num">GMV</th>
+            <th class="num">GMV MAX 노출</th>
+            <th class="num">GMV MAX 클릭</th>
+            <th class="num">CTR</th>
+            <th class="num">광고비</th>
+          </tr>
+        </thead>
+        <tbody id="videoListBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="creatorList" class="creator-list" hidden>
+    <div class="loading-state" id="loadingState">
+      <div class="spinner"></div>
+      <p>구글시트에서 로우데이터를 불러오는 중입니다…</p>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <p>원본 데이터: 어필리에잇 로우데이터 (Google Sheets) · 피키 로우데이터 / 스파크애즈(수기) / GMV MAX(수기)</p>
+  <p>티어 정보는 이 브라우저에만 저장됩니다. 팀과 공유하려면 "티어 내보내기"로 CSV를 백업해 공유하세요.</p>
+</footer>
+
+<script src="js/app.js"></script>
+</body>
+</html>
