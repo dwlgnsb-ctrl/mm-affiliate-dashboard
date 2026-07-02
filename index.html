@@ -8,10 +8,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 </head>
 <body>
-
-<div class="noise-layer"></div>
 
 <header class="topbar">
   <div class="topbar-left">
@@ -58,6 +57,35 @@
     <div class="kpi-card">
       <span class="kpi-label">미매칭 스파크애즈 지출</span>
       <span class="kpi-value warn" id="kpiUnmatchedSpark">–</span>
+    </div>
+  </section>
+
+  <section class="insight-row" id="insightRow">
+    <div class="insight-card best">
+      <div class="insight-label">🏆 TOP 크리에이터 (GMV)</div>
+      <div class="insight-title" id="insightTopCreator">–</div>
+      <div class="insight-sub" id="insightTopCreatorSub">–</div>
+    </div>
+    <div class="insight-card worst">
+      <div class="insight-label">⚠ 미매칭 스파크애즈</div>
+      <div class="insight-title" id="insightUnmatched">–</div>
+      <div class="insight-sub">Ad name 계정 핸들 확인 필요</div>
+    </div>
+    <div class="insight-card opp">
+      <div class="insight-label">💡 광고 미집행 노출 최다 영상</div>
+      <div class="insight-title" id="insightOpportunity">–</div>
+      <div class="insight-sub" id="insightOpportunitySub">GMV MAX 태우면 좋을 후보</div>
+    </div>
+  </section>
+
+  <section class="chart-row">
+    <div class="chart-card">
+      <h3>크리에이터 TOP 10 (GMV 기준, USD)</h3>
+      <canvas id="topCreatorsChart"></canvas>
+    </div>
+    <div class="chart-card">
+      <h3>영상 모집 출처 비중</h3>
+      <canvas id="originChart"></canvas>
     </div>
   </section>
 
@@ -115,6 +143,7 @@
             <th>업로드일</th>
             <th>영상</th>
             <th class="num">조회/노출</th>
+            <th class="num">전환수</th>
             <th class="num">GMV</th>
             <th class="num">GMV MAX 노출</th>
             <th class="num">GMV MAX 클릭</th>
