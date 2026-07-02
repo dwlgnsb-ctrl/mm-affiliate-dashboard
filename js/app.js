@@ -110,12 +110,14 @@ function parsePicky(table) {
 }
 
 // 누리(자동) / GEC(수기): 컬럼 배치가 거의 동일, offset만 다름
-function parseVideoListSheet(table, sourceName, colOffset) {
+// requireFlagO=true면 A열이 정확히 'O'인 행만 채택 (누리: 'X'는 누리 진행 아님)
+function parseVideoListSheet(table, sourceName, colOffset, requireFlagO) {
   const rows = table.rows || [];
   const videos = [];
   const off = colOffset; // 누리=1 (앞에 여부 컬럼 있음), GEC=0
   for (const row of rows) {
     const c = row.c || [];
+    if (requireFlagO && cellStr(c[0]).toUpperCase() !== 'O') continue;
     const link = cellStr(c[1 + off]);
     const username = cellStr(c[3 + off]);
     if (!username || !link) continue;
@@ -286,8 +288,7 @@ function parseGmvMax(table) {
   return map;
 }
 
-function parseSparkAds(table) {
-  const rows = table.rows || [];
+function parseSparkAds(table) {const rows = table.rows || [];
   // dedupe by adName + day (keep last occurrence = most recently appended)
   const dedup = new Map();
   for (const row of rows) {
@@ -322,7 +323,9 @@ function parseSparkAds(table) {
     agg.rows += 1;
   }
   return { byHandle, unmatchedRows };
-}/* ---------------- Join + group ---------------- */
+}
+
+/* ---------------- Join + group ---------------- */
 
 // GEC 로우데이터를 "전체 기준 리스트"로 삼고, 피키/누리/GCD는 각 영상의 모집 출처를
 // 알려주는 태그로만 사용한다. (사용자 확정 기준)
@@ -342,12 +345,15 @@ function buildMasterVideoList(picky, nuri, gec, gcd) {
   const master = [];
   const seenIds = new Set();
 
+  // 1) GEC = 기준 리스트. 전부 포함하고, 출처(어디서 모집됐는지)만 태깅.
   for (const v of gec) {
     const origin = v.videoId ? originOf(v.videoId) : 'GEC';
     master.push({ ...v, origin, registeredInGec: true });
     if (v.videoId) seenIds.add(v.videoId);
   }
 
+  // 2) GEC에는 없지만 다른 소스엔 있는 영상 — 데이터 누락 방지를 위해 추가하되
+  //    "GEC 미등록"으로 표시해서 구분한다 (우선순위: 피키 > 누리 > GCD)
   for (const { list, tag } of [{ list: picky, tag: '피키' }, { list: nuri, tag: '누리' }, { list: gcd, tag: 'GCD' }]) {
     for (const v of list) {
       if (!v.videoId || seenIds.has(v.videoId)) continue;
@@ -359,6 +365,8 @@ function buildMasterVideoList(picky, nuri, gec, gcd) {
   return master;
 }
 
+// GCD 이름에 (L0)/(L2) 처럼 붙어있는 티어 힌트는, 그 영상이 위에서 중복 제거되어
+// 빠지더라도 크리에이터에게는 계속 반영되도록 별도로 모아둔다.
 function buildTierHintMap(gcdRows) {
   const map = new Map();
   for (const v of gcdRows) {
@@ -395,6 +403,8 @@ function buildDashboardData(allVideos, gmvMaxMap, sparkResult, tierHintMap) {
     creator.videos.push({ ...v, gmvMax });
   }
 
+  // 소셜핸들이 없는 크리에이터는 유저네임을 핸들 대체값으로 사용 (스파크애즈 매칭용, best-effort)
+  // GCD 이름에서 뽑은 티어 힌트도 여기서 백필 (해당 영상이 GEC 중복으로 걸러졌어도 반영되도록)
   for (const creator of creatorMap.values()) {
     if (!creator.socialHandle) creator.socialHandle = creator.username.toLowerCase();
     if (!creator.tierHint && tierHintMap) {
@@ -403,6 +413,7 @@ function buildDashboardData(allVideos, gmvMaxMap, sparkResult, tierHintMap) {
     }
   }
 
+  // 스파크애즈를 소셜핸들 기준으로 매칭
   const matchedHandles = new Set();
   for (const creator of creatorMap.values()) {
     const spark = sparkResult.byHandle.get(creator.socialHandle) || null;
@@ -416,6 +427,7 @@ function buildDashboardData(allVideos, gmvMaxMap, sparkResult, tierHintMap) {
   for (const row of sparkResult.unmatchedRows) unmatchedSparkTotal += row.cost;
 
   const creators = Array.from(creatorMap.values()).map(c => {
+    // 날짜 있는 영상은 최신순, 날짜 없는 영상(GCD)은 맨 아래로
     c.videos.sort((a, b) => {
       if (a.postDate && b.postDate) return b.postDate - a.postDate;
       if (a.postDate && !b.postDate) return -1;
@@ -495,6 +507,74 @@ function renderKpis(data) {
   document.getElementById('kpiUnmatchedSpark').textContent = fmtKrw(data.unmatchedSparkTotal);
 }
 
+function renderInsights(data) {
+  const topCreator = [...data.creators].sort((a, b) => b.totalGmv - a.totalGmv)[0];
+  if (topCreator) {
+    document.getElementById('insightTopCreator').textContent = topCreator.username;
+    document.getElementById('insightTopCreatorSub').textContent = `GMV ${fmtUsd(topCreator.totalGmv)} · 영상 ${topCreator.videos.length}개`;
+  }
+  document.getElementById('insightUnmatched').textContent = fmtKrw(data.unmatchedSparkTotal);
+
+  let best = null;
+  for (const c of data.creators) {
+    for (const v of c.videos) {
+      if (v.gmvMax) continue;
+      const val = v.views !== null ? v.views : (v.impressions || 0);
+      if (!best || val > best.val) best = { val, v, c };
+    }
+  }
+  if (best) {
+    document.getElementById('insightOpportunity').textContent = `${best.c.username} · ${fmtInt(best.val)}회`;
+    document.getElementById('insightOpportunitySub').textContent = best.v.postDate ? best.v.postDate.toLocaleDateString('ko-KR') + ' 업로드 · GMV MAX 태우면 좋을 후보' : '날짜 미상 · GMV MAX 태우면 좋을 후보';
+  }
+}
+
+let topCreatorsChartInstance = null;
+let originChartInstance = null;
+
+function renderCharts(data) {
+  if (typeof Chart === 'undefined') return;
+
+  const top10 = [...data.creators].sort((a, b) => b.totalGmv - a.totalGmv).slice(0, 10);
+  const ctx1 = document.getElementById('topCreatorsChart');
+  if (topCreatorsChartInstance) topCreatorsChartInstance.destroy();
+  topCreatorsChartInstance = new Chart(ctx1, {
+    type: 'bar',
+    data: {
+      labels: top10.map(c => c.username),
+      datasets: [{
+        label: 'GMV (USD)',
+        data: top10.map(c => Number(c.totalGmv.toFixed(2))),
+        backgroundColor: '#4b6bfb',
+        borderRadius: 6
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: { legend: { display: false } },
+      scales: { x: { beginAtZero: true } }
+    }
+  });
+
+  const originCounts = {};
+  for (const c of data.creators) for (const v of c.videos) {
+    originCounts[v.origin] = (originCounts[v.origin] || 0) + 1;
+  }
+  const ctx2 = document.getElementById('originChart');
+  if (originChartInstance) originChartInstance.destroy();
+  originChartInstance = new Chart(ctx2, {
+    type: 'doughnut',
+    data: {
+      labels: Object.keys(originCounts),
+      datasets: [{
+        data: Object.values(originCounts),
+        backgroundColor: ['#4b6bfb', '#8b5cf6', '#22c58b', '#f5a623', '#17b4c9']
+      }]
+    },
+    options: { plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } } } }
+  });
+}
+
 function renderTierFilterOptions() {
   const tiers = loadTiers();
   const uniqueTiers = Array.from(new Set(Object.values(tiers).filter(Boolean))).sort();
@@ -514,11 +594,13 @@ function videoRow(v) {
   const unregBadge = v.registeredInGec === false ? `<span class="badge badge-warn" title="GEC 로우데이터에는 없는 영상">GEC 미등록</span>` : '';
   const viewsOrImpr = v.views !== null ? v.views : (v.impressions !== null ? v.impressions : 0);
   const gmvCell = v.origin === 'GCD' && v.gmv === 0 ? '-' : fmtUsd(v.gmv);
+  const orders = gm ? gm.skuOrders : v.orders;
   return `
     <tr class="${!v.postDate ? 'row-undated' : ''}">
       <td>${v.postDate ? fmtDate(v.postDate) : '날짜 미상'}</td>
       <td><a class="vlink" href="${v.videoLink}" target="_blank" rel="noopener">영상 링크 ↗</a> ${originBadge} ${adBadge} ${unregBadge}</td>
       <td class="num">${fmtInt(viewsOrImpr)}</td>
+      <td class="num">${fmtInt(orders)}</td>
       <td class="num">${gmvCell}</td>
       <td class="num">${gm ? fmtInt(gm.impressions) : '-'}</td>
       <td class="num">${gm ? fmtInt(gm.clicks) : '-'}</td>
@@ -568,6 +650,7 @@ function creatorCard(creator, idx) {
               <th>업로드 일시</th>
               <th>영상 (출처)</th>
               <th class="num">조회/노출</th>
+              <th class="num">전환수</th>
               <th class="num">GMV</th>
               <th class="num">노출 (GMV MAX)</th>
               <th class="num">클릭 (GMV MAX)</th>
@@ -656,6 +739,7 @@ function fullListRow(v) {
       <td>${v.postDate ? v.postDate.toLocaleDateString('ko-KR') : '날짜 미상'}</td>
       <td><a class="vlink" href="${v.videoLink}" target="_blank" rel="noopener">영상 링크 ↗</a> ${originBadge} ${adBadge} ${unregBadge}</td>
       <td class="num">${fmtInt(viewsOrImpr)}</td>
+      <td class="num">${fmtInt(orders)}</td>
       <td class="num">${gmvCell}</td>
       <td class="num">${gm ? fmtInt(gm.impressions) : '-'}</td>
       <td class="num">${gm ? fmtInt(gm.clicks) : '-'}</td>
@@ -739,8 +823,8 @@ async function loadAll() {
     ]);
 
     const pickyRows = parsePicky(pickyT);
-    const nuriRows = parseVideoListSheet(nuriT, 'nuri', 1);
-    const gecRows = parseVideoListSheet(gecT, 'gec', 0);
+    const nuriRows = parseVideoListSheet(nuriT, 'nuri', 1, true);
+    const gecRows = parseVideoListSheet(gecT, 'gec', 0, false);
     const gcdRows = parseGCD(gcdT);
     const gmvMaxMap = parseGmvMax(gmvmaxT);
     const sparkResult = parseSparkAds(sparkT);
@@ -771,6 +855,8 @@ async function loadAll() {
 
     setSync('ok', `마지막 동기화 ${state.lastSync.toLocaleTimeString('ko-KR')} · GEC 기준 통합`);
     renderKpis(state);
+    renderInsights(state);
+    renderCharts(state);
     renderTierFilterOptions();
     if (currentView === 'videos') renderVideoListView();
     else render();
