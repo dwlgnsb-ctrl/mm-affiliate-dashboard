@@ -37,7 +37,12 @@ async function fetchSheetTable(gid) {
 
 function cellVal(cell) {
   if (!cell) return null;
-  return cell.v !== undefined ? cell.v : (cell.f !== undefined ? cell.f : null);
+  // 포맷된 문자열(f)을 우선 사용: 틱톡 영상 ID처럼 19자리 큰 숫자가 시트에 "숫자"로
+  // 저장돼 있으면 v(부동소수점)로 읽을 때 자바스크립트 정밀도 한계(15~16자리)로
+  // 뒷자리가 깨져서 Post ID 매칭이 통째로 실패하는 문제가 있었음. f는 시트에 표시되는
+  // 그대로의 정확한 문자열이라 이 문제가 없음.
+  if (cell.f !== undefined && cell.f !== null && cell.f !== '') return cell.f;
+  return cell.v !== undefined ? cell.v : null;
 }
 function cellNum(cell) {
   const v = cellVal(cell);
