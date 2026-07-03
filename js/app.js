@@ -421,10 +421,31 @@ function buildDashboardData(allVideos, gmvMaxMap, sparkResult, tierHintMap) {
     if (spark) matchedHandles.add(creator.socialHandle);
   }
   let unmatchedSparkTotal = 0;
+  const sparkUnmatchedDetails = [];
   for (const [handle, agg] of sparkResult.byHandle.entries()) {
-    if (!matchedHandles.has(handle)) unmatchedSparkTotal += agg.cost;
+    if (!matchedHandles.has(handle)) {
+      unmatchedSparkTotal += agg.cost;
+      sparkUnmatchedDetails.push({
+        name: handle,
+        cost: agg.cost,
+        impressions: agg.impressions,
+        clicks: agg.clicks,
+        type: 'handle-unmatched',
+        raw: `@${handle} (Ad name ${agg.rows}건 합산)`
+      });
+    }
   }
-  for (const row of sparkResult.unmatchedRows) unmatchedSparkTotal += row.cost;
+  for (const row of sparkResult.unmatchedRows) {
+    unmatchedSparkTotal += row.cost;
+    sparkUnmatchedDetails.push({
+      name: null,
+      cost: row.cost,
+      impressions: row.impressions,
+      clicks: row.clicks,
+      type: 'no-handle',
+      raw: row.adName
+    });
+  }
 
   const creators = Array.from(creatorMap.values()).map(c => {
     // 날짜 있는 영상은 최신순, 날짜 없는 영상(GCD)은 맨 아래로
@@ -441,7 +462,7 @@ function buildDashboardData(allVideos, gmvMaxMap, sparkResult, tierHintMap) {
     return c;
   });
 
-  return { creators, unmatchedSparkTotal, undatedTotal: creators.reduce((s, c) => s + c.undatedVideoCount, 0) };
+  return { creators, unmatchedSparkTotal, sparkUnmatchedDetails, undatedTotal: creators.reduce((s, c) => s + c.undatedVideoCount, 0) };
 }
 
 /* ---------------- Tier storage ---------------- */
@@ -507,72 +528,23 @@ function renderKpis(data) {
   document.getElementById('kpiUnmatchedSpark').textContent = fmtKrw(data.unmatchedSparkTotal);
 }
 
-function renderInsights(data) {
-  const topCreator = [...data.creators].sort((a, b) => b.totalGmv - a.totalGmv)[0];
-  if (topCreator) {
-    document.getElementById('insightTopCreator').textContent = topCreator.username;
-    document.getElementById('insightTopCreatorSub').textContent = `GMV ${fmtUsd(topCreator.totalGmv)} · 영상 ${topCreator.videos.length}개`;
+function renderSparkUnmatched(details) {
+  const tbody = document.getElementById('sparkUnmatchedBody');
+  if (!tbody) return;
+  if (!details || details.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">미매칭 스파크애즈 지출이 없습니다.</td></tr>`;
+    return;
   }
-  document.getElementById('insightUnmatched').textContent = fmtKrw(data.unmatchedSparkTotal);
-
-  let best = null;
-  for (const c of data.creators) {
-    for (const v of c.videos) {
-      if (v.gmvMax) continue;
-      const val = v.views !== null ? v.views : (v.impressions || 0);
-      if (!best || val > best.val) best = { val, v, c };
-    }
-  }
-  if (best) {
-    document.getElementById('insightOpportunity').textContent = `${best.c.username} · ${fmtInt(best.val)}회`;
-    document.getElementById('insightOpportunitySub').textContent = best.v.postDate ? best.v.postDate.toLocaleDateString('ko-KR') + ' 업로드 · GMV MAX 태우면 좋을 후보' : '날짜 미상 · GMV MAX 태우면 좋을 후보';
-  }
-}
-
-let topCreatorsChartInstance = null;
-let originChartInstance = null;
-
-function renderCharts(data) {
-  if (typeof Chart === 'undefined') return;
-
-  const top10 = [...data.creators].sort((a, b) => b.totalGmv - a.totalGmv).slice(0, 10);
-  const ctx1 = document.getElementById('topCreatorsChart');
-  if (topCreatorsChartInstance) topCreatorsChartInstance.destroy();
-  topCreatorsChartInstance = new Chart(ctx1, {
-    type: 'bar',
-    data: {
-      labels: top10.map(c => c.username),
-      datasets: [{
-        label: 'GMV (USD)',
-        data: top10.map(c => Number(c.totalGmv.toFixed(2))),
-        backgroundColor: '#4b6bfb',
-        borderRadius: 6
-      }]
-    },
-    options: {
-      indexAxis: 'y',
-      plugins: { legend: { display: false } },
-      scales: { x: { beginAtZero: true } }
-    }
-  });
-
-  const originCounts = {};
-  for (const c of data.creators) for (const v of c.videos) {
-    originCounts[v.origin] = (originCounts[v.origin] || 0) + 1;
-  }
-  const ctx2 = document.getElementById('originChart');
-  if (originChartInstance) originChartInstance.destroy();
-  originChartInstance = new Chart(ctx2, {
-    type: 'doughnut',
-    data: {
-      labels: Object.keys(originCounts),
-      datasets: [{
-        data: Object.values(originCounts),
-        backgroundColor: ['#4b6bfb', '#8b5cf6', '#22c58b', '#f5a623', '#17b4c9']
-      }]
-    },
-    options: { plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } } } }
-  });
+  const sorted = [...details].sort((a, b) => b.cost - a.cost);
+  tbody.innerHTML = sorted.map(d => `
+    <tr>
+      <td class="creator-cell">${d.name || '(핸들 추출 실패)'}</td>
+      <td><span class="badge ${d.type === 'no-handle' ? 'badge-warn' : 'badge-none'}">${d.type === 'no-handle' ? '핸들 추출 실패' : '핸들은 뽑혔지만 매칭 안 됨'}</span></td>
+      <td class="num">${fmtKrw(d.cost)}</td>
+      <td class="num">${fmtInt(d.impressions || 0)}</td>
+      <td class="num">${fmtInt(d.clicks || 0)}</td>
+      <td class="stat-label">${d.raw || '-'}</td>
+    </tr>`).join('');
 }
 
 function renderTierFilterOptions() {
@@ -583,9 +555,7 @@ function renderTierFilterOptions() {
   sel.innerHTML = '<option value="">전체 티어</option>' +
     uniqueTiers.map(t => `<option value="${t}">${t}</option>`).join('');
   sel.value = current;
-}
-
-function videoRow(v) {
+}function videoRow(v) {
   const gm = v.gmvMax;
   const adBadge = gm
     ? `<span class="badge badge-gmvmax">GMV MAX</span>`
@@ -855,8 +825,7 @@ async function loadAll() {
 
     setSync('ok', `마지막 동기화 ${state.lastSync.toLocaleTimeString('ko-KR')} · GEC 기준 통합`);
     renderKpis(state);
-    renderInsights(state);
-    renderCharts(state);
+    renderSparkUnmatched(data.sparkUnmatchedDetails);
     renderTierFilterOptions();
     if (currentView === 'videos') renderVideoListView();
     else render();
