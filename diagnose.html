@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>매칭 진단 도구</title>
+<style>
+  body{font-family:monospace; background:#111; color:#eee; padding:20px; font-size:13px;}
+  h2{color:#4bf; margin-top:30px;}
+  .row{padding:6px 0; border-bottom:1px solid #333;}
+  .ok{color:#5f5;}
+  .bad{color:#f55;}
+  .raw{color:#fa5; background:#222; padding:2px 6px; border-radius:4px;}
+  table{border-collapse:collapse; margin-top:10px;}
+  td,th{border:1px solid #444; padding:6px 10px; text-align:left;}
+</style>
+</head>
+<body>
+<h1>GMV MAX 매칭 진단</h1>
+<div id="output">불러오는 중...</div>
+
+<script>
+const SHEET_ID = '1I94_eBKmYHs3HtAEbI1h3cZx5ZhH7G8vLEuf4Koqc1k';
+const GEC_GID = '704602447';
+const GMVMAX_GID = '327690174';
+
+async function fetchTable(gid) {
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=${gid}`;
+  const res = await fetch(url);
+  const text = await res.text();
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  return JSON.parse(text.substring(start, end + 1)).table;
+}
+
+function cellRaw(cell) {
+  if (!cell) return { v: null, f: null };
+  return { v: cell.v, f: cell.f };
+}
+
+(async () => {
+  const out = document.getElementById('output');
+  try {
+    const [gec, gmvmax] = await Promise.all([fetchTable(GEC_GID), fetchTable(GMVMAX_GID)]);
+
+    let html = '';
+
+    // 1. GMV MAX 원본 Post ID 앞 15개, v/f 원본값 그대로 노출
+    html += '<h2>1. GMV MAX 시트 — Post ID 원본값 (앞 15개 행)</h2><table><tr><th>#</th><th>v (raw)</th><th>f (formatted)</th><th>cellStr 결과(쉼표제거 후)</th><th>Cost(v)</th><th>Cost(f)</th></tr>';
+    const rows = gmvmax.rows || [];
+    for (let i = 0; i < Math.min(15, rows.length); i++) {
+      const c = rows[i].c || [];
+      const idCell = cellRaw(c[1]);
+      const cleaned = String(idCell.f !== undefined && idCell.f !== null && idCell.f !== '' ? idCell.f : idCell.v).replace(/[^\d]/g, '');
+      const costCell = cellRaw(c[8]);
+      html += `<tr><td>${i}</td><td class="raw">${idCell.v}</td><td class="raw">${idCell.f}</td><td class="ok">${cleaned}</td><td>${costCell.v}</td><td>${costCell.f}</td></tr>`;
+    }
+    html += '</table>';
+
+    // 2. 전체 GMV MAX 총합 (클라이언트에서 직접 재계산)
+    let totalCostFromV = 0, totalCostFromF = 0, validPostIdCount = 0;
+    const postIdSet = new Set();
+    for (const row of rows) {
+      const c = row.c || [];
+      const idCell = cellRaw(c[1]);
+      const cleaned = String(idCell.f !== undefined && idCell.f !== null && idCell.f !== '' ? idCell.f : idCell.v).replace(/[^\d]/g, '');
+      if (cleaned) { postIdSet.add(cleaned); validPostIdCount++; }
+      const costV = typeof c[8]?.v === 'number' ? c[8].v : parseFloat(String(c[8]?.v || '0').replace(/,/g, '')) || 0;
+      totalCostFromV += costV;
+    }
+    html += `<h2>2. GMV MAX 전체 요약</h2>`;
+    html += `<div class="row">총 행 수: <b>${rows.length}</b></div>`;
+    html += `<div class="row">유효한 Post ID를 가진 행 수: <b>${validPostIdCount}</b></div>`;
+    html += `<div class="row">고유 Post ID 개수: <b>${postIdSet.size}</b></div>`;
+    html += `<div class="row">전체 Cost 합계(v 기준, 직접 재계산): <b>${totalCostFromV.toLocaleString()}</b> KRW</div>`;
+
+    // 3. GEC에서 videoId 추출, 그리고 소소니 postId Set과 교집합 확인
+    function extractVideoId(link) {
+      if (!link) return null;
+      const m = String(link).match(/video\/(\d+)/);
+      return m ? m[1] : null;
+    }
+    const gecRows = gec.rows || [];
+    let gecVideoIds = [];
+    for (const row of gecRows) {
+      const c = row.c || [];
+      const link = c[1]?.v || c[1]?.f || '';
+      const vid = extractVideoId(link);
+      if (vid) gecVideoIds.push(vid);
+    }
+    const matched = gecVideoIds.filter(id => postIdSet.has(id));
+    html += `<h2>3. GEC ↔ GMV MAX 매칭 확인</h2>`;
+    html += `<div class="row">GEC 시트 총 행 수: <b>${gecRows.length}</b></div>`;
+    html += `<div class="row">GEC에서 추출된 videoId 개수: <b>${gecVideoIds.length}</b></div>`;
+    html += `<div class="row">GMV MAX postIdSet과 <span class="${matched.length>0?'ok':'bad'}">매칭된 개수: <b>${matched.length}</b></span></div>`;
+    html += `<div class="row">매칭된 videoId 예시(최대10개): <span class="raw">${matched.slice(0,10).join(', ') || '(없음)'}</span></div>`;
+
+    // 4. 특정 postId 하드코딩 검증
+    const target = '7642431506832575774';
+    html += `<h2>4. 특정 영상(soyaury505) 직접 검증</h2>`;
+    html += `<div class="row">GEC videoId 목록에 ${target} 포함? <span class="${gecVideoIds.includes(target)?'ok':'bad'}">${gecVideoIds.includes(target)}</span></div>`;
+    html += `<div class="row">GMV MAX postIdSet에 ${target} 포함? <span class="${postIdSet.has(target)?'ok':'bad'}">${postIdSet.has(target)}</span></div>`;
+
+    out.innerHTML = html;
+  } catch (err) {
+    out.innerHTML = '<div class="bad">에러: ' + err.message + '</div>';
+    console.error(err);
+  }
+})();
+</script>
+</body>
+</html>
