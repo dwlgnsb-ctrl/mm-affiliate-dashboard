@@ -100,6 +100,20 @@ function cellRaw(cell) {
     html += `<div class="row">GEC videoId 목록에 ${target} 포함? <span class="${gecVideoIds.includes(target)?'ok':'bad'}">${gecVideoIds.includes(target)}</span></div>`;
     html += `<div class="row">GMV MAX postIdSet에 ${target} 포함? <span class="${postIdSet.has(target)?'ok':'bad'}">${postIdSet.has(target)}</span></div>`;
 
+    // 5. GEC 원본 컬럼 덤프 (링크 컬럼이 정확히 어디 있는지, 실제 값이 뭔지 확인)
+    html += `<h2>5. GEC 시트 원본 컬럼 덤프 (앞 8개 행, 컬럼 0~4)</h2><table><tr><th>#</th><th>col0 (v/f)</th><th>col1 (v/f)</th><th>col2 (v/f)</th><th>col3 (v/f)</th><th>col4 (v/f)</th></tr>';
+    for (let i = 0; i < Math.min(8, gecRows.length); i++) {
+      const c = gecRows[i].c || [];
+      const cellPair = (cell) => {
+        if (!cell) return '<span class="bad">(빈셀)</span>';
+        const v = cell.v !== undefined ? String(cell.v).slice(0, 60) : '(v없음)';
+        const f = cell.f !== undefined ? String(cell.f).slice(0, 60) : '(f없음)';
+        return `<span class="raw">v: ${v}</span><br><span class="raw">f: ${f}</span>`;
+      };
+      html += `<tr><td>${i}</td><td>${cellPair(c[0])}</td><td>${cellPair(c[1])}</td><td>${cellPair(c[2])}</td><td>${cellPair(c[3])}</td><td>${cellPair(c[4])}</td></tr>`;
+    }
+    html += '</table>';
+
     out.innerHTML = html;
   } catch (err) {
     out.innerHTML = '<div class="bad">에러: ' + err.message + '</div>';
