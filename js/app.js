@@ -244,7 +244,10 @@ function parseGmvMax(table) {
   const dailyMap = new Map();
   for (const row of rows) {
     const c = row.c || [];
-    const postId = cellStr(c[1]);
+    // 쉼표/공백 등 숫자가 아닌 문자를 제거 — 시트에서 Post ID가 "숫자" 서식으로
+    // 저장돼 있으면 표시 문자열에 천단위 쉼표(예: 7,642,431,...)가 끼어서
+    // 영상 링크에서 뽑은 순수 숫자 ID와 매칭이 실패하는 문제가 있었음.
+    const postId = cellStr(c[1]).replace(/[^\d]/g, '');
     if (!postId || postId === 'N/A') continue;
     const date = cellDate(c[0]);
     const dateKey = date ? date.toISOString().slice(0, 10) : cellStr(c[0]);
