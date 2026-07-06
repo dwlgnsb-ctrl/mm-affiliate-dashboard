@@ -802,7 +802,7 @@ async function loadAll() {
 
     const pickyRows = parsePicky(pickyT);
     const nuriRows = parseVideoListSheet(nuriT, 'nuri', 1, true);
-    const gecRows = parseVideoListSheet(gecT, 'gec', 0, false);
+    const gecRows = parseVideoListSheet(gecT, 'gec', 1, false); // GEC에 '날짜'(월별 라벨) 컬럼이 새로 추가되면서 전체가 한 칸씩 밀림
     const gcdRows = parseGCD(gcdT);
     const gmvMaxMap = parseGmvMax(gmvmaxT);
     const sparkResult = parseSparkAds(sparkT);
