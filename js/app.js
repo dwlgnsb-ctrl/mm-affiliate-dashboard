@@ -250,11 +250,17 @@ function parseGmvMax(table) {
     const postId = cellStr(c[1]).replace(/[^\d]/g, '');
     if (!postId || postId === 'N/A') continue;
     const date = cellDate(c[0]);
-    const dateKey = date ? date.toISOString().slice(0, 10) : cellStr(c[0]);
+    const dateKeyRaw = date ? date.toISOString().slice(0, 10) : cellStr(c[0]);
+    const dateKey = dateKeyRaw;
+    // 월 라벨 추출: "2026-06-22" 단일 날짜든 "2026-06-22~2026-06-28" 기간이든
+    // 앞쪽 YYYY-MM만 뽑아서 월별 분류에 사용 (기간이 월을 넘나드는 경우는 시작월 기준)
+    const monthMatch = dateKeyRaw.match(/(\d{4})-(\d{2})/);
+    const monthKey = monthMatch ? `${monthMatch[1]}-${monthMatch[2]}` : '기타';
     const key = postId + '||' + dateKey;
     dailyMap.set(key, {
       postId,
       date,
+      monthKey,
       cost: cellNum(c[8]),          // 그날 하루치 실제 소진액
       skuOrders: cellNum(c[9]),     // 그날 하루치 주문수
       grossRevenue: cellNum(c[11]), // 그날 하루치 매출
@@ -264,13 +270,16 @@ function parseGmvMax(table) {
   }
 
   // 2단계: postId 기준으로 일자별 값을 전부 합산 (누적 광고비 = 일별 소진액의 합)
+  // 동시에 월별(byMonth) 세부 합계도 따로 쌓아서, 나중에 "월 선택" 필터에 쓸 수 있게 함
   const map = new Map();
+  const allMonths = new Set();
   for (const entry of dailyMap.values()) {
     if (!map.has(entry.postId)) {
       map.set(entry.postId, {
         postId: entry.postId,
         cost: 0, skuOrders: 0, grossRevenue: 0, impressions: 0, clicks: 0,
-        days: 0, firstDate: null, lastDate: null
+        days: 0, firstDate: null, lastDate: null,
+        byMonth: {}
       });
     }
     const agg = map.get(entry.postId);
@@ -284,6 +293,26 @@ function parseGmvMax(table) {
       if (!agg.firstDate || entry.date < agg.firstDate) agg.firstDate = entry.date;
       if (!agg.lastDate || entry.date > agg.lastDate) agg.lastDate = entry.date;
     }
+
+    allMonths.add(entry.monthKey);
+    if (!agg.byMonth[entry.monthKey]) {
+      agg.byMonth[entry.monthKey] = { cost: 0, skuOrders: 0, grossRevenue: 0, impressions: 0, clicks: 0 };
+    }
+    const m = agg.byMonth[entry.monthKey];
+    m.cost += entry.cost;
+    m.skuOrders += entry.skuOrders;
+    m.grossRevenue += entry.grossRevenue;
+    m.impressions += entry.impressions;
+    m.clicks += entry.clicks;
+  }
+
+  // 월별 비율 지표도 재계산
+  for (const agg of map.values()) {
+    for (const m of Object.values(agg.byMonth)) {
+      m.clickRate = m.impressions ? m.clicks / m.impressions : 0;
+      m.convRate = m.clicks ? m.skuOrders / m.clicks : 0;
+      m.roi = m.cost ? m.grossRevenue / m.cost : 0;
+    }
   }
 
   // 3단계: 비율 지표는 합산된 총합으로 재계산 (비율끼리 더하면 안 됨)
@@ -293,10 +322,11 @@ function parseGmvMax(table) {
     agg.roi = agg.cost ? agg.grossRevenue / agg.cost : 0;
   }
 
-  return map;
+  return { map, months: Array.from(allMonths).filter(m => m !== '기타').sort() };
 }
 
-function parseSparkAds(table) {const rows = table.rows || [];
+function parseSparkAds(table) {
+  const rows = table.rows || [];
   // dedupe by adName + day (keep last occurrence = most recently appended)
   const dedup = new Map();
   for (const row of rows) {
@@ -525,7 +555,10 @@ const fmtDate = d => d ? d.toLocaleString('ko-KR', { year: 'numeric', month: '2-
 function renderKpis(data) {
   const totalVideos = data.creators.reduce((s, c) => s + c.videos.length, 0);
   const totalGmv = data.creators.reduce((s, c) => s + c.totalGmv, 0);
-  const gmvMaxCost = data.creators.reduce((s, c) => s + c.videos.reduce((s2, v) => s2 + (v.gmvMax ? v.gmvMax.cost : 0), 0), 0);
+  const gmvMaxCost = data.creators.reduce((s, c) => s + c.videos.reduce((s2, v) => {
+    const gm = gmvForMonth(v.gmvMax, selectedGmvMonth);
+    return s2 + (gm ? gm.cost : 0);
+  }, 0), 0);
   const sparkCost = data.creators.reduce((s, c) => s + (c.spark ? c.spark.cost : 0), 0);
 
   document.getElementById('kpiCreators').textContent = fmtInt(data.creators.length);
@@ -563,8 +596,10 @@ function renderTierFilterOptions() {
   sel.innerHTML = '<option value="">전체 티어</option>' +
     uniqueTiers.map(t => `<option value="${t}">${t}</option>`).join('');
   sel.value = current;
-}function videoRow(v) {
-  const gm = v.gmvMax;
+}
+
+function videoRow(v) {
+  const gm = gmvForMonth(v.gmvMax, selectedGmvMonth);
   const adBadge = gm
     ? `<span class="badge badge-gmvmax">GMV MAX</span>`
     : `<span class="badge badge-none">미집행</span>`;
@@ -689,6 +724,26 @@ function render() {
 }
 
 let currentView = 'videos';
+let selectedGmvMonth = 'all';
+
+// 선택된 월에 해당하는 GMV MAX 수치만 뽑아준다. 'all'이면 전체 누적, 아니면
+// 그 달에 집행 이력이 없는 영상은 null(=그 달엔 미집행)로 처리한다.
+function gmvForMonth(gm, month) {
+  if (!gm) return null;
+  if (month === 'all') return gm;
+  return gm.byMonth && gm.byMonth[month] ? gm.byMonth[month] : null;
+}
+
+function populateGmvMonthFilter() {
+  const sel = document.getElementById('gmvMonthFilter');
+  if (!sel) return;
+  const current = sel.value || 'all';
+  const months = state.gmvMonths || [];
+  sel.innerHTML = '<option value="all">광고비: 전체 기간(누적)</option>' +
+    months.map(m => `<option value="${m}">광고비: ${m}</option>`).join('');
+  sel.value = months.includes(current) || current === 'all' ? current : 'all';
+  selectedGmvMonth = sel.value;
+}
 let videoSort = 'impressions';
 
 function flattenAllVideos() {
@@ -704,7 +759,7 @@ function flattenAllVideos() {
 }
 
 function fullListRow(v) {
-  const gm = v.gmvMax;
+  const gm = gmvForMonth(v.gmvMax, selectedGmvMonth);
   const adBadge = gm ? `<span class="badge badge-gmvmax">GMV MAX</span>` : `<span class="badge badge-none">미집행</span>`;
   const originBadge = `<span class="badge badge-none" title="모집 출처">${v.origin}</span>`;
   const unregBadge = v.registeredInGec === false ? `<span class="badge badge-warn" title="GEC 로우데이터에는 없는 영상">GEC 미등록</span>` : '';
@@ -734,15 +789,16 @@ function renderVideoListView() {
   let list = flattenAllVideos().filter(v => {
     if (search && !(v.creatorUsername.toLowerCase().includes(search) || (v.creatorSocialHandle || '').includes(search))) return false;
     if (tierFilterVal && v.tier !== tierFilterVal) return false;
-    if (adOnly && !v.gmvMax) return false;
+    if (adOnly && !gmvForMonth(v.gmvMax, selectedGmvMonth)) return false;
     return true;
   });
 
   const val = v => {
+    const gm = gmvForMonth(v.gmvMax, selectedGmvMonth);
     switch (videoSort) {
-      case 'impressions': return v.gmvMax ? v.gmvMax.impressions : -1;
-      case 'orders': return v.gmvMax ? v.gmvMax.skuOrders : v.orders;
-      case 'cost': return v.gmvMax ? v.gmvMax.cost : -1;
+      case 'impressions': return gm ? gm.impressions : -1;
+      case 'orders': return gm ? gm.skuOrders : v.orders;
+      case 'cost': return gm ? gm.cost : -1;
       case 'gmv': return v.gmv;
       case 'recent': return v.postDate ? v.postDate.getTime() : -1;
       default: return 0;
@@ -804,7 +860,9 @@ async function loadAll() {
     const nuriRows = parseVideoListSheet(nuriT, 'nuri', 1, true);
     const gecRows = parseVideoListSheet(gecT, 'gec', 1, false); // GEC에 '날짜'(월별 라벨) 컬럼이 새로 추가되면서 전체가 한 칸씩 밀림
     const gcdRows = parseGCD(gcdT);
-    const gmvMaxMap = parseGmvMax(gmvmaxT);
+    const gmvResult = parseGmvMax(gmvmaxT);
+    const gmvMaxMap = gmvResult.map;
+    state.gmvMonths = gmvResult.months;
     const sparkResult = parseSparkAds(sparkT);
 
     const master = buildMasterVideoList(pickyRows, nuriRows, gecRows, gcdRows);
@@ -832,6 +890,7 @@ async function loadAll() {
     }
 
     setSync('ok', `마지막 동기화 ${state.lastSync.toLocaleTimeString('ko-KR')} · GEC 기준 통합`);
+    populateGmvMonthFilter();
     renderKpis(state);
     renderSparkUnmatched(data.sparkUnmatchedDetails);
     renderTierFilterOptions();
@@ -851,6 +910,12 @@ document.getElementById('refreshBtn').addEventListener('click', loadAll);
 document.getElementById('searchInput').addEventListener('input', () => currentView === 'videos' ? renderVideoListView() : render());
 document.getElementById('sortSelect').addEventListener('change', render);
 document.getElementById('tierFilter').addEventListener('change', () => currentView === 'videos' ? renderVideoListView() : render());
+document.getElementById('gmvMonthFilter').addEventListener('change', (e) => {
+  selectedGmvMonth = e.target.value;
+  renderKpis(state);
+  if (currentView === 'videos') renderVideoListView();
+  else render();
+});
 document.getElementById('exportTiersBtn').addEventListener('click', exportTiersCsv);
 document.getElementById('importTiersInput').addEventListener('change', (e) => {
   if (e.target.files[0]) importTiersCsv(e.target.files[0]);
