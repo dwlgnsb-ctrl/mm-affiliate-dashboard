@@ -421,6 +421,7 @@ main{max-width:1320px; margin:0 auto; padding:28px 32px 80px;}
 .badge-gmvmax{background:#eef1ff; color:var(--blue);}
 .badge-none{background:#f1f2f7; color:var(--text-faint);}
 .badge-warn{background:#fff3d6; color:#a3720a;}
+.badge-spark{background:#ffeef1; color:var(--coral);}
 
 .empty-state{
   text-align:center;
