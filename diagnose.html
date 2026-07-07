@@ -22,6 +22,7 @@
 const SHEET_ID = '1I94_eBKmYHs3HtAEbI1h3cZx5ZhH7G8vLEuf4Koqc1k';
 const GEC_GID = '704602447';
 const GMVMAX_GID = '327690174';
+const SPARK_GID = '1393881713';
 
 async function fetchTable(gid) {
   const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=${gid}`;
@@ -115,6 +116,61 @@ function cellRaw(cell) {
     html += '</table>';
 
     out.innerHTML = html;
+
+    // 6. 스파크애즈 진단 (별도로 이어서 렌더링)
+    const spark = await fetchTable(SPARK_GID);
+    const sparkRows = spark.rows || [];
+    let html2 = `<h2>6. 스파크애즈 시트 원본 덤프 (앞 5개 행, 컬럼 0~5)</h2><table><tr><th>#</th><th>col0</th><th>col1</th><th>col2</th><th>col3 (Ad name)</th><th>col4 (By Day)</th><th>col5</th></tr>`;
+    const cellPair2 = (cell) => {
+      if (!cell) return '<span class="bad">(빈셀)</span>';
+      const v = cell.v !== undefined ? String(cell.v).slice(0, 70) : '(v없음)';
+      const f = cell.f !== undefined ? String(cell.f).slice(0, 70) : '(f없음)';
+      return `<span class="raw">v: ${v}</span><br><span class="raw">f: ${f}</span>`;
+    };
+    for (let i = 0; i < Math.min(5, sparkRows.length); i++) {
+      const c = sparkRows[i].c || [];
+      html2 += `<tr><td>${i}</td><td>${cellPair2(c[0])}</td><td>${cellPair2(c[1])}</td><td>${cellPair2(c[2])}</td><td>${cellPair2(c[3])}</td><td>${cellPair2(c[4])}</td><td>${cellPair2(c[5])}</td></tr>`;
+    }
+    html2 += '</table>';
+
+    function extractTrailingVideoId(name) {
+      const m = String(name).match(/(\d{15,19})$/);
+      return m ? m[1] : null;
+    }
+
+    // dedup 재현 (앱 코드와 동일 로직)
+    const dedup = new Map();
+    for (const row of sparkRows) {
+      const c = row.c || [];
+      const adNameCell = c[3];
+      const adName = String(adNameCell?.f !== undefined && adNameCell?.f !== null && adNameCell?.f !== '' ? adNameCell.f : (adNameCell?.v ?? '')).trim();
+      const dayCell = c[4];
+      const dayStr = String(dayCell?.f !== undefined && dayCell?.f !== null && dayCell?.f !== '' ? dayCell.f : (dayCell?.v ?? '')).trim();
+      if (!adName) continue;
+      const key = adName + '||' + dayStr;
+      dedup.set(key, {
+        adName, dayStr,
+        cost: typeof c[10]?.v === 'number' ? c[10].v : parseFloat(String(c[10]?.v || '0').replace(/,/g,'')) || 0
+      });
+    }
+
+    let targetTotal = 0, targetCount = 0, totalDedupRows = dedup.size, totalRawRows = sparkRows.length;
+    const byVideoIdCount = new Set();
+    for (const entry of dedup.values()) {
+      const vid = extractTrailingVideoId(entry.adName);
+      if (vid) byVideoIdCount.add(vid);
+      if (vid === target) { targetTotal += entry.cost; targetCount++; }
+    }
+
+    html2 += `<h2>7. 스파크애즈 ↔ 특정 영상(${target}) 매칭 확인</h2>`;
+    html2 += `<div class="row">스파크애즈 원본 총 행 수: <b>${totalRawRows}</b></div>`;
+    html2 += `<div class="row">중복제거(dedup) 후 행 수: <b>${totalDedupRows}</b> (원본과 크게 다르면 dedup 키 문제 의심)</div>`;
+    html2 += `<div class="row">Ad name에서 영상ID가 추출된 고유 영상 개수: <b>${byVideoIdCount.size}</b></div>`;
+    html2 += `<div class="row">타겟 영상ID(${target})로 매칭된 dedup 행 수: <span class="${targetCount>0?'ok':'bad'}"><b>${targetCount}</b></span></div>`;
+    html2 += `<div class="row">타겟 영상 Cost 합계(직접 재계산): <span class="${targetTotal>0?'ok':'bad'}"><b>${targetTotal.toLocaleString()}</b> KRW</span></div>`;
+    html2 += `<div class="row">GEC videoId 목록에 타겟 포함? <span class="${gecVideoIds.includes(target)?'ok':'bad'}">${gecVideoIds.includes(target)}</span></div>`;
+
+    out.innerHTML += html2;
   } catch (err) {
     out.innerHTML = '<div class="bad">에러: ' + err.message + '</div>';
     console.error(err);
