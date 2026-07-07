@@ -83,6 +83,20 @@ function extractHandle(text) {
   return m ? m[1].toLowerCase() : null;
 }
 
+// "Feb-26", "Jul-26" 같은 월 라벨을 비교 가능한 숫자(202602, 202607 등)로 변환.
+// 파싱 실패 시 null 반환 (호출부에서 "마지막 등장한 행 우선"으로 대체 처리)
+const MONTH_ABBR = { jan:1, feb:2, mar:3, apr:4, may:5, jun:6, jul:7, aug:8, sep:9, oct:10, nov:11, dec:12 };
+function parseMonthLabel(label) {
+  if (!label) return null;
+  const m = String(label).trim().match(/^([A-Za-z]{3})-?(\d{2,4})$/);
+  if (!m) return null;
+  const mon = MONTH_ABBR[m[1].toLowerCase()];
+  if (!mon) return null;
+  let year = parseInt(m[2], 10);
+  if (year < 100) year += 2000;
+  return year * 100 + mon;
+}
+
 /* ---------------- Parsers per sheet ---------------- */
 
 function parsePicky(table) {
@@ -129,6 +143,7 @@ function parseVideoListSheet(table, sourceName, colOffset, requireFlagO) {
     videos.push({
       source: sourceName,
       postDate: cellDate(c[2 + off]),
+      batchLabel: off > 0 ? cellStr(c[0]) : null, // GEC의 "날짜"(스냅샷 뽑은 월) 등, 중복 스냅샷 판별용
       username,
       socialHandle: null,
       followerCount: 0,
@@ -325,6 +340,14 @@ function parseGmvMax(table) {
   return { map, months: Array.from(allMonths).filter(m => m !== '기타').sort() };
 }
 
+// Ad name 맨 끝에 붙는 19자리 안팎의 숫자(영상 Post ID)를 추출.
+// 최근 광고명 규칙(...@계정핸들(N)_1234567890123456789)에서만 존재하고,
+// 예전 방식으로 지어진 광고명에는 없어서 그 경우는 null을 반환한다.
+function extractTrailingVideoId(name) {
+  const m = String(name).match(/(\d{15,19})$/);
+  return m ? m[1] : null;
+}
+
 function parseSparkAds(table) {
   const rows = table.rows || [];
   // dedupe by adName + day (keep last occurrence = most recently appended)
@@ -332,23 +355,47 @@ function parseSparkAds(table) {
   for (const row of rows) {
     const c = row.c || [];
     const adName = cellStr(c[3]);
-    const day = cellStr(c[4]);
+    const dayStr = cellStr(c[4]);
     if (!adName) continue;
-    const key = adName + '||' + day;
+    const key = adName + '||' + dayStr;
+    const date = cellDate(c[4]);
+    const monthMatch = (date ? date.toISOString().slice(0, 7) : dayStr).match(/(\d{4})-(\d{2})/);
     dedup.set(key, {
       adName,
       adGroup: cellStr(c[2]),
       campaign: cellStr(c[1]),
-      day,
+      day: dayStr,
+      monthKey: monthMatch ? `${monthMatch[1]}-${monthMatch[2]}` : '기타',
       impressions: cellNum(c[9]),
       cost: cellNum(c[10]),
       clicks: cellNum(c[11])
     });
   }
-  // aggregate by extracted handle
+
+  // 1순위: Ad name 끝의 영상 ID로 영상 단위 정확 매칭 (최근 광고명 규칙 적용된 것만)
+  // 2순위(폴백): 영상 ID를 못 뽑으면 예전처럼 @계정핸들로 크리에이터 단위 합산
+  const byVideoId = new Map();
   const byHandle = new Map();
   const unmatchedRows = [];
+
   for (const entry of dedup.values()) {
+    const videoId = extractTrailingVideoId(entry.adName);
+    if (videoId) {
+      if (!byVideoId.has(videoId)) {
+        byVideoId.set(videoId, { videoId, impressions: 0, clicks: 0, cost: 0, rows: 0, byMonth: {} });
+      }
+      const agg = byVideoId.get(videoId);
+      agg.impressions += entry.impressions;
+      agg.clicks += entry.clicks;
+      agg.cost += entry.cost;
+      agg.rows += 1;
+      if (!agg.byMonth[entry.monthKey]) agg.byMonth[entry.monthKey] = { impressions: 0, clicks: 0, cost: 0 };
+      const m = agg.byMonth[entry.monthKey];
+      m.impressions += entry.impressions;
+      m.clicks += entry.clicks;
+      m.cost += entry.cost;
+      continue;
+    }
     const handle = extractHandle(entry.adName) || extractHandle(entry.adGroup) || extractHandle(entry.campaign);
     if (!handle) { unmatchedRows.push(entry); continue; }
     if (!byHandle.has(handle)) {
@@ -360,7 +407,15 @@ function parseSparkAds(table) {
     agg.cost += entry.cost;
     agg.rows += 1;
   }
-  return { byHandle, unmatchedRows };
+
+  for (const agg of byVideoId.values()) {
+    agg.clickRate = agg.impressions ? agg.clicks / agg.impressions : 0;
+    for (const m of Object.values(agg.byMonth)) {
+      m.clickRate = m.impressions ? m.clicks / m.impressions : 0;
+    }
+  }
+
+  return { byVideoId, byHandle, unmatchedRows };
 }
 
 /* ---------------- Join + group ---------------- */
@@ -383,8 +438,28 @@ function buildMasterVideoList(picky, nuri, gec, gcd) {
   const master = [];
   const seenIds = new Set();
 
-  // 1) GEC = 기준 리스트. 전부 포함하고, 출처(어디서 모집됐는지)만 태깅.
+  // 0) GEC 자체에 같은 영상이 여러 스냅샷(날짜)으로 중복 등장할 수 있어서,
+  //    videoId별로 가장 최근 스냅샷(batchLabel 기준) 하나만 남긴다.
+  //    라벨을 못 읽는 경우엔 시트에 나중에 나온(=더 최근에 추가된) 행을 우선한다.
+  const gecDeduped = new Map(); // videoId -> video, videoId 없는 행은 별도 보관
+  const gecNoId = [];
   for (const v of gec) {
+    if (!v.videoId) { gecNoId.push(v); continue; }
+    const existing = gecDeduped.get(v.videoId);
+    if (!existing) { gecDeduped.set(v.videoId, v); continue; }
+    const newLabel = parseMonthLabel(v.batchLabel);
+    const oldLabel = parseMonthLabel(existing.batchLabel);
+    if (newLabel !== null && oldLabel !== null) {
+      if (newLabel >= oldLabel) gecDeduped.set(v.videoId, v);
+    } else {
+      // 라벨을 못 읽으면 시트 순서상 나중 행(= 더 최근에 append됨)을 우선
+      gecDeduped.set(v.videoId, v);
+    }
+  }
+  const gecClean = [...gecDeduped.values(), ...gecNoId];
+
+  // 1) GEC = 기준 리스트. 전부 포함하고, 출처(어디서 모집됐는지)만 태깅.
+  for (const v of gecClean) {
     const origin = v.videoId ? originOf(v.videoId) : 'GEC';
     master.push({ ...v, origin, registeredInGec: true });
     if (v.videoId) seenIds.add(v.videoId);
@@ -417,6 +492,7 @@ function buildTierHintMap(gcdRows) {
 
 function buildDashboardData(allVideos, gmvMaxMap, sparkResult, tierHintMap) {
   const creatorMap = new Map();
+  const videoIdSet = new Set(allVideos.filter(v => v.videoId).map(v => v.videoId));
 
   for (const v of allVideos) {
     const key = v.username.toLowerCase();
@@ -438,7 +514,12 @@ function buildDashboardData(allVideos, gmvMaxMap, sparkResult, tierHintMap) {
     if (v.videoId && gmvMaxMap.has(v.videoId)) {
       gmvMax = gmvMaxMap.get(v.videoId);
     }
-    creator.videos.push({ ...v, gmvMax });
+    // 스파크애즈: Ad name 끝에 영상ID가 붙은 최근 광고만 영상 단위로 정확 매칭됨
+    let sparkAd = null;
+    if (v.videoId && sparkResult.byVideoId.has(v.videoId)) {
+      sparkAd = sparkResult.byVideoId.get(v.videoId);
+    }
+    creator.videos.push({ ...v, gmvMax, sparkAd });
   }
 
   // 소셜핸들이 없는 크리에이터는 유저네임을 핸들 대체값으로 사용 (스파크애즈 매칭용, best-effort)
@@ -451,15 +532,51 @@ function buildDashboardData(allVideos, gmvMaxMap, sparkResult, tierHintMap) {
     }
   }
 
-  // 스파크애즈를 소셜핸들 기준으로 매칭
+  // 스파크애즈 크리에이터 합계 = (영상 단위로 정확 매칭된 것들의 합) + (영상ID가 없는
+  // 예전 방식 광고는 계정 핸들로 크리에이터 단위 합산해서 보충)
   const matchedHandles = new Set();
   for (const creator of creatorMap.values()) {
-    const spark = sparkResult.byHandle.get(creator.socialHandle) || null;
-    creator.spark = spark;
-    if (spark) matchedHandles.add(creator.socialHandle);
+    const videoSum = { impressions: 0, clicks: 0, cost: 0 };
+    for (const v of creator.videos) {
+      if (v.sparkAd) {
+        videoSum.impressions += v.sparkAd.impressions;
+        videoSum.clicks += v.sparkAd.clicks;
+        videoSum.cost += v.sparkAd.cost;
+      }
+    }
+    const handleFallback = sparkResult.byHandle.get(creator.socialHandle) || null;
+    if (handleFallback) matchedHandles.add(creator.socialHandle);
+    const hasVideoLevel = videoSum.cost > 0 || videoSum.impressions > 0 || videoSum.clicks > 0;
+    if (hasVideoLevel || handleFallback) {
+      creator.spark = {
+        impressions: videoSum.impressions + (handleFallback ? handleFallback.impressions : 0),
+        clicks: videoSum.clicks + (handleFallback ? handleFallback.clicks : 0),
+        cost: videoSum.cost + (handleFallback ? handleFallback.cost : 0),
+        videoLevelCost: videoSum.cost,
+        handleFallbackCost: handleFallback ? handleFallback.cost : 0,
+        mixed: hasVideoLevel && !!handleFallback
+      };
+    } else {
+      creator.spark = null;
+    }
   }
+
   let unmatchedSparkTotal = 0;
   const sparkUnmatchedDetails = [];
+  // 영상 단위로는 매칭됐지만, 그 영상 자체가 지금 우리 영상 목록(마스터 리스트)에 없는 경우
+  for (const [videoId, agg] of sparkResult.byVideoId.entries()) {
+    if (!videoIdSet.has(videoId)) {
+      unmatchedSparkTotal += agg.cost;
+      sparkUnmatchedDetails.push({
+        name: null,
+        cost: agg.cost,
+        impressions: agg.impressions,
+        clicks: agg.clicks,
+        type: 'video-unmatched',
+        raw: `Post ID ${videoId} (영상 목록에 없음)`
+      });
+    }
+  }
   for (const [handle, agg] of sparkResult.byHandle.entries()) {
     if (!matchedHandles.has(handle)) {
       unmatchedSparkTotal += agg.cost;
@@ -469,7 +586,7 @@ function buildDashboardData(allVideos, gmvMaxMap, sparkResult, tierHintMap) {
         impressions: agg.impressions,
         clicks: agg.clicks,
         type: 'handle-unmatched',
-        raw: `@${handle} (Ad name ${agg.rows}건 합산)`
+        raw: `@${handle} (Ad name ${agg.rows}건 합산, 영상ID 없는 예전 방식)`
       });
     }
   }
@@ -559,7 +676,15 @@ function renderKpis(data) {
     const gm = gmvForMonth(v.gmvMax, selectedGmvMonth);
     return s2 + (gm ? gm.cost : 0);
   }, 0), 0);
-  const sparkCost = data.creators.reduce((s, c) => s + (c.spark ? c.spark.cost : 0), 0);
+  const sparkCost = data.creators.reduce((s, c) => {
+    const videoLevel = c.videos.reduce((s2, v) => {
+      const sp = sparkForMonth(v.sparkAd, selectedGmvMonth);
+      return s2 + (sp ? sp.cost : 0);
+    }, 0);
+    // 핸들 폴백(예전 방식) 금액은 월 구분이 없어서 "전체 기간" 볼 때만 더함
+    const handleFallback = (selectedGmvMonth === 'all' && c.spark) ? c.spark.handleFallbackCost : 0;
+    return s + videoLevel + handleFallback;
+  }, 0);
 
   document.getElementById('kpiCreators').textContent = fmtInt(data.creators.length);
   document.getElementById('kpiVideos').textContent = fmtInt(totalVideos);
@@ -576,11 +701,13 @@ function renderSparkUnmatched(details) {
     tbody.innerHTML = `<tr><td colspan="6" class="empty-state">미매칭 스파크애즈 지출이 없습니다.</td></tr>`;
     return;
   }
+  const typeLabel = { 'no-handle': '핸들 추출 실패', 'video-unmatched': '영상ID는 있으나 목록에 없음', 'handle-unmatched': '핸들은 뽑혔지만 매칭 안 됨' };
+  const typeBadge = { 'no-handle': 'badge-warn', 'video-unmatched': 'badge-spark', 'handle-unmatched': 'badge-none' };
   const sorted = [...details].sort((a, b) => b.cost - a.cost);
   tbody.innerHTML = sorted.map(d => `
     <tr>
-      <td class="creator-cell">${d.name || '(핸들 추출 실패)'}</td>
-      <td><span class="badge ${d.type === 'no-handle' ? 'badge-warn' : 'badge-none'}">${d.type === 'no-handle' ? '핸들 추출 실패' : '핸들은 뽑혔지만 매칭 안 됨'}</span></td>
+      <td class="creator-cell">${d.name || (d.type === 'video-unmatched' ? '(영상 ID)' : '(핸들 추출 실패)')}</td>
+      <td><span class="badge ${typeBadge[d.type] || 'badge-none'}">${typeLabel[d.type] || d.type}</span></td>
       <td class="num">${fmtKrw(d.cost)}</td>
       <td class="num">${fmtInt(d.impressions || 0)}</td>
       <td class="num">${fmtInt(d.clicks || 0)}</td>
@@ -600,9 +727,11 @@ function renderTierFilterOptions() {
 
 function videoRow(v) {
   const gm = gmvForMonth(v.gmvMax, selectedGmvMonth);
+  const sp = sparkForMonth(v.sparkAd, selectedGmvMonth);
   const adBadge = gm
     ? `<span class="badge badge-gmvmax">GMV MAX</span>`
     : `<span class="badge badge-none">미집행</span>`;
+  const sparkBadge = sp ? `<span class="badge badge-spark">스파크 정확매칭</span>` : '';
   const originBadge = `<span class="badge badge-none" title="모집 출처">${v.origin}</span>`;
   const unregBadge = v.registeredInGec === false ? `<span class="badge badge-warn" title="GEC 로우데이터에는 없는 영상">GEC 미등록</span>` : '';
   const viewsOrImpr = v.views !== null ? v.views : (v.impressions !== null ? v.impressions : 0);
@@ -611,7 +740,7 @@ function videoRow(v) {
   return `
     <tr class="${!v.postDate ? 'row-undated' : ''}">
       <td>${v.postDate ? fmtDate(v.postDate) : '날짜 미상'}</td>
-      <td><a class="vlink" href="${v.videoLink}" target="_blank" rel="noopener">영상 링크 ↗</a> ${originBadge} ${adBadge} ${unregBadge}</td>
+      <td><a class="vlink" href="${v.videoLink}" target="_blank" rel="noopener">영상 링크 ↗</a> ${originBadge} ${adBadge} ${sparkBadge} ${unregBadge}</td>
       <td class="num">${fmtInt(viewsOrImpr)}</td>
       <td class="num">${fmtInt(orders)}</td>
       <td class="num">${gmvCell}</td>
@@ -619,6 +748,9 @@ function videoRow(v) {
       <td class="num">${gm ? fmtInt(gm.clicks) : '-'}</td>
       <td class="num">${gm ? fmtPct(gm.clickRate) : '-'}</td>
       <td class="num">${gm ? fmtKrw(gm.cost) : '-'}</td>
+      <td class="num">${sp ? fmtInt(sp.impressions) : '-'}</td>
+      <td class="num">${sp ? fmtInt(sp.clicks) : '-'}</td>
+      <td class="num">${sp ? fmtKrw(sp.cost) : '-'}</td>
     </tr>`;
 }
 
@@ -632,6 +764,7 @@ function creatorCard(creator, idx) {
          <span><span class="label">클릭</span><span class="value">${fmtInt(creator.spark.clicks)}</span></span>
          <span><span class="label">CTR</span><span class="value">${fmtPct(creator.spark.impressions ? creator.spark.clicks / creator.spark.impressions : 0)}</span></span>
          <span><span class="label">광고비 소진</span><span class="value">${fmtKrw(creator.spark.cost)}</span></span>
+         ${creator.spark.mixed ? `<span class="stat-label">(영상 단위 정확 매칭 ${fmtKrw(creator.spark.videoLevelCost)} + 예전 방식 크리에이터 합산 ${fmtKrw(creator.spark.handleFallbackCost)})</span>` : ''}
        </div>`
     : `<div class="spark-summary unmatched">스파크애즈 집행 내역 없음 / 미매칭 (소셜핸들 추정값: ${creator.socialHandle || '없음'})</div>`;
 
@@ -669,6 +802,9 @@ function creatorCard(creator, idx) {
               <th class="num">클릭 (GMV MAX)</th>
               <th class="num">CTR (GMV MAX)</th>
               <th class="num">광고비 (GMV MAX)</th>
+              <th class="num">노출 (스파크)</th>
+              <th class="num">클릭 (스파크)</th>
+              <th class="num">광고비 (스파크)</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
@@ -734,6 +870,14 @@ function gmvForMonth(gm, month) {
   return gm.byMonth && gm.byMonth[month] ? gm.byMonth[month] : null;
 }
 
+// 스파크애즈(영상 단위 매칭)도 동일한 방식으로 월별 필터링. 크리에이터 단위
+// 핸들 폴백 합산분은 월 구분이 없어서 'all'일 때만 반영됨(개별 함수에서 처리).
+function sparkForMonth(sp, month) {
+  if (!sp) return null;
+  if (month === 'all') return sp;
+  return sp.byMonth && sp.byMonth[month] ? sp.byMonth[month] : null;
+}
+
 function populateGmvMonthFilter() {
   const sel = document.getElementById('gmvMonthFilter');
   if (!sel) return;
@@ -760,7 +904,9 @@ function flattenAllVideos() {
 
 function fullListRow(v) {
   const gm = gmvForMonth(v.gmvMax, selectedGmvMonth);
+  const sp = sparkForMonth(v.sparkAd, selectedGmvMonth);
   const adBadge = gm ? `<span class="badge badge-gmvmax">GMV MAX</span>` : `<span class="badge badge-none">미집행</span>`;
+  const sparkBadge = sp ? `<span class="badge badge-spark">스파크 정확매칭</span>` : '';
   const originBadge = `<span class="badge badge-none" title="모집 출처">${v.origin}</span>`;
   const unregBadge = v.registeredInGec === false ? `<span class="badge badge-warn" title="GEC 로우데이터에는 없는 영상">GEC 미등록</span>` : '';
   const viewsOrImpr = v.views !== null ? v.views : (v.impressions !== null ? v.impressions : 0);
@@ -770,7 +916,7 @@ function fullListRow(v) {
     <tr class="${!v.postDate ? 'row-undated' : ''}">
       <td class="creator-cell">${v.creatorUsername}${v.tier ? `<span class="tier-tag">${v.tier}</span>` : ''}</td>
       <td>${v.postDate ? v.postDate.toLocaleDateString('ko-KR') : '날짜 미상'}</td>
-      <td><a class="vlink" href="${v.videoLink}" target="_blank" rel="noopener">영상 링크 ↗</a> ${originBadge} ${adBadge} ${unregBadge}</td>
+      <td><a class="vlink" href="${v.videoLink}" target="_blank" rel="noopener">영상 링크 ↗</a> ${originBadge} ${adBadge} ${sparkBadge} ${unregBadge}</td>
       <td class="num">${fmtInt(viewsOrImpr)}</td>
       <td class="num">${fmtInt(orders)}</td>
       <td class="num">${gmvCell}</td>
@@ -778,6 +924,9 @@ function fullListRow(v) {
       <td class="num">${gm ? fmtInt(gm.clicks) : '-'}</td>
       <td class="num">${gm ? fmtPct(gm.clickRate) : '-'}</td>
       <td class="num">${gm ? fmtKrw(gm.cost) : '-'}</td>
+      <td class="num">${sp ? fmtInt(sp.impressions) : '-'}</td>
+      <td class="num">${sp ? fmtInt(sp.clicks) : '-'}</td>
+      <td class="num">${sp ? fmtKrw(sp.cost) : '-'}</td>
     </tr>`;
 }
 
